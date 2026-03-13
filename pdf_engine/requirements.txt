@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+arq
+redis
+playwright
+rapidfuzz
+python-multipart
+pydantic
+PyMuPDF
