@@ -14,7 +14,7 @@ services:
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
-        value: "3.11"
+        value: "3.11.9"
       - key: REDIS_URL
         fromDatabase:
           name: qa-redis
@@ -29,7 +29,7 @@ services:
     startCommand: python -m arq pdf_engine.worker.WorkerSettings
     envVars:
       - key: PYTHON_VERSION
-        value: "3.11"
+        value: "3.11.9"
       - key: REDIS_URL
         fromDatabase:
           name: qa-redis
