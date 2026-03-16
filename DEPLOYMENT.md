@@ -2,11 +2,13 @@
 
 This guide deploys three services for free:
 
-| Service                                | Platform | What it does                            |
-| -------------------------------------- | -------- | --------------------------------------- |
-| **Redis**                              | Render   | Job queue + status store                |
-| **Backend** (FastAPI API + ARQ Worker) | Render   | PDF extraction, web scraping, QA checks |
-| **Frontend** (Next.js)                 | Vercel   | Dashboard UI                            |
+| Service                                                | Platform | What it does                            |
+| ------------------------------------------------------ | -------- | --------------------------------------- |
+| **Redis**                                              | Render   | Job queue + status store                |
+| **Backend** (FastAPI API + ARQ Worker, single service) | Render   | PDF extraction, web scraping, QA checks |
+| **Frontend** (Next.js)                                 | Vercel   | Dashboard UI                            |
+
+> **Architecture note:** The API and Worker run as two processes inside a single Render Web Service using [honcho](https://github.com/nickstenning/honcho) (a Python Procfile runner). This keeps things simple — one service, one deploy, one set of logs.
 
 ---
 
@@ -52,7 +54,14 @@ git push -u origin main
 
 ---
 
-## Part 3 — FastAPI Backend on Render (Free)
+## Part 3 — Backend on Render (API + Worker in one service)
+
+Both the FastAPI API and the ARQ Worker run together in a single Render Web Service using **honcho** and a `Procfile`.
+
+Your repo already has:
+
+- `Procfile` (repo root) — defines the two processes
+- `honcho` in `pdf_engine/requirements.txt` — the process runner
 
 1. Go to [https://dashboard.render.com](https://dashboard.render.com)
 2. Click **New** → **Web Service**
@@ -60,16 +69,22 @@ git push -u origin main
 4. Select your QA repo
 5. Fill in the settings:
 
-| Field              | Value                                                     |
-| ------------------ | --------------------------------------------------------- |
-| **Name**           | `qa-api`                                                  |
-| **Region**         | Same region as your Redis                                 |
-| **Branch**         | `main`                                                    |
-| **Root Directory** | _(leave empty)_                                           |
-| **Runtime**        | `Python 3`                                                |
-| **Build Command**  | `pip install -r pdf_engine/requirements.txt`              |
-| **Start Command**  | `uvicorn pdf_engine.main:app --host 0.0.0.0 --port $PORT` |
-| **Plan**           | Free                                                      |
+| Field              | Value                                                                                   |
+| ------------------ | --------------------------------------------------------------------------------------- |
+| **Name**           | `qa-api`                                                                                |
+| **Region**         | Same region as your Redis                                                               |
+| **Branch**         | `main`                                                                                  |
+| **Root Directory** | _(leave empty)_                                                                         |
+| **Runtime**        | `Python 3`                                                                              |
+| **Build Command**  | `pip install -r pdf_engine/requirements.txt && playwright install --with-deps chromium` |
+| **Start Command**  | `honcho start`                                                                          |
+| **Plan**           | Free                                                                                    |
+
+> **Why `honcho start`?** It reads the `Procfile` and launches both processes:
+> ```
+> web: uvicorn pdf_engine.main:app --host 0.0.0.0 --port $PORT
+> worker: python -m arq pdf_engine.worker.WorkerSettings
+> ```
 
 6. Scroll down to **Environment Variables**, click **Add Environment Variable**:
 
@@ -78,12 +93,17 @@ git push -u origin main
 | `REDIS_URL` | Paste the Internal URL from Part 2 (e.g. `redis://red-abc123xyz:6379`) |
 
 7. Click **Create Web Service**
-8. Wait for the build to complete (~2-4 minutes)
-9. Once deployed, Render gives you a public URL like:
+8. Wait for the build to complete (~3-5 minutes, Playwright downloads Chromium)
+9. In the logs, you should see both processes start:
    ```
-   https://qa-api-xxxx.onrender.com
+   web.1    | Uvicorn running on http://0.0.0.0:XXXX
+   worker.1 | Starting worker for 1 functions
    ```
-10. Test it by visiting:
+10. Once deployed, Render gives you a public URL like:
+    ```
+    https://qa-api-xxxx.onrender.com
+    ```
+11. Test it by visiting:
     ```
     https://qa-api-xxxx.onrender.com/health
     ```
@@ -96,40 +116,7 @@ git push -u origin main
 
 ---
 
-## Part 4 — ARQ Worker on Render (Free)
-
-The worker runs the actual PDF pipeline in the background. It is a separate process.
-
-1. Go to [https://dashboard.render.com](https://dashboard.render.com)
-2. Click **New** → **Background Worker**
-3. Connect the same GitHub repo
-4. Fill in the settings:
-
-| Field              | Value                                                                                   |
-| ------------------ | --------------------------------------------------------------------------------------- |
-| **Name**           | `qa-worker`                                                                             |
-| **Region**         | Same region as your Redis and API                                                       |
-| **Branch**         | `main`                                                                                  |
-| **Root Directory** | _(leave empty)_                                                                         |
-| **Runtime**        | `Python 3`                                                                              |
-| **Build Command**  | `pip install -r pdf_engine/requirements.txt && playwright install --with-deps chromium` |
-| **Start Command**  | `python -m arq pdf_engine.worker.WorkerSettings`                                        |
-| **Plan**           | Free                                                                                    |
-
-5. Add **Environment Variable**:
-
-| Key         | Value                         |
-| ----------- | ----------------------------- |
-| `REDIS_URL` | Same Internal URL from Part 2 |
-
-6. Click **Create Background Worker**
-7. Wait for the build (~3-5 minutes, Playwright downloads Chromium)
-
-> **The build command installs Chromium** because the worker uses Playwright to scrape websites. This is expected and works within Render's free tier disk limits.
-
----
-
-## Part 5 — Frontend on Vercel (Free)
+## Part 4 — Frontend on Vercel (Free)
 
 1. Go to [https://vercel.com/dashboard](https://vercel.com/dashboard)
 2. Click **Add New...** → **Project**
@@ -171,9 +158,9 @@ Open it in your browser — your QA Dashboard is live.
 
 If the job stays stuck on "Queued", check:
 
-- Render Dashboard → `qa-worker` → **Logs** (is the worker running?)
+- Render Dashboard → `qa-api` → **Logs** (is the worker process running? Look for `worker.1` lines)
 - Render Dashboard → `qa-redis` → **Info** (is Redis active?)
-- Both services must use the same `REDIS_URL`
+- The `REDIS_URL` env var must be set on `qa-api`
 
 ---
 
@@ -181,10 +168,10 @@ If the job stays stuck on "Queued", check:
 
 ### "Job queued but never progresses"
 
-The worker is not connected to Redis. Check:
+The worker process is not running or not connected to Redis. Check:
 
-1. `qa-worker` Logs on Render — look for connection errors
-2. Make sure `REDIS_URL` in both `qa-api` and `qa-worker` is the **Internal URL** (starts with `redis://red-`)
+1. `qa-api` Logs on Render — look for `worker.1` lines and connection errors
+2. Make sure `REDIS_URL` on `qa-api` is the **Internal URL** (starts with `redis://red-`)
 
 ### "Network Error" in the browser console
 
@@ -200,7 +187,7 @@ This is normal on Render's free tier. Free services "sleep" after 15 minutes of 
 
 ### Build fails on Render with "playwright" errors
 
-Make sure the worker **Build Command** is:
+Make sure the **Build Command** on `qa-api` is:
 
 ```
 pip install -r pdf_engine/requirements.txt && playwright install --with-deps chromium
@@ -213,28 +200,24 @@ The `--with-deps` flag installs system-level dependencies (fonts, libraries) tha
 ## Architecture Diagram
 
 ```
-┌──────────────────────┐         ┌──────────────────────────┐
-│   Vercel (free)      │         │   Render (free)          │
-│                      │  HTTPS  │                          │
-│  Next.js Frontend    │────────▶│  FastAPI API             │
-│  qa-dashboard/       │         │  POST /process           │
-│                      │         │  GET  /jobs/{id}         │
-└──────────────────────┘         │  GET  /health            │
-                                 └──────────┬───────────────┘
-                                            │ enqueue job
-                                            ▼
-                                 ┌──────────────────────────┐
-                                 │  Render Redis (free)     │
-                                 │  Job queue + status      │
-                                 └──────────┬───────────────┘
-                                            │ pick up job
-                                            ▼
-                                 ┌──────────────────────────┐
-                                 │  Render Worker (free)    │
-                                 │  ARQ + Playwright        │
-                                 │  PDF extract → Scrape    │
-                                 │  → QA checks → Report    │
-                                 └──────────────────────────┘
+┌──────────────────────┐         ┌──────────────────────────────┐
+│   Vercel (free)      │         │   Render Web Service (free)  │
+│                      │  HTTPS  │                              │
+│  Next.js Frontend    │────────▶│  honcho start                │
+│  qa-dashboard/       │         │  ├─ web: FastAPI API         │
+│                      │         │  │  POST /process            │
+└──────────────────────┘         │  │  GET  /jobs/{id}          │
+                                 │  │  GET  /health             │
+                                 │  └─ worker: ARQ + Playwright │
+                                 │     PDF extract → Scrape     │
+                                 │     → QA checks → Report     │
+                                 └──────────────┬───────────────┘
+                                                │ enqueue / pick up
+                                                ▼
+                                 ┌──────────────────────────────┐
+                                 │  Render Redis (free)         │
+                                 │  Job queue + status          │
+                                 └──────────────────────────────┘
 ```
 
 ---
@@ -243,7 +226,7 @@ The `--with-deps` flag installs system-level dependencies (fonts, libraries) tha
 
 When you push new code to `main`:
 
-- **Render** auto-redeploys the API and Worker (if auto-deploy is on, which is the default)
+- **Render** auto-redeploys `qa-api` (both API and Worker restart together)
 - **Vercel** auto-redeploys the frontend
 
 No manual steps needed after initial setup.
