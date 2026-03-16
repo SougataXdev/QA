@@ -2,17 +2,22 @@
 test_normalizer.py — Regression tests for two-pass comparison pipeline.
 
 Covers:
-  prepare_for_comparison() — Pass 1 preparation
-  typographic_normalise()  — Pass 2 aggressive normalisation
+  prepare_for_comparison() — Pass 1: NFKC + skeleton folding
+  typographic_normalise()  — Pass 2 safety net
   get_find_text()          — issue text extractor
   pass_two_filter()        — Pass 2 filter logic
+  skeleton_map             — download, cache, offline fallback
   Full pipeline            — end-to-end with check functions
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from unittest.mock import MagicMock
+import os
+import time
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -42,7 +47,7 @@ def test_prepare_fi_ligature():
 
 
 def test_prepare_all_ligatures():
-    """Every ligature in LIGATURE_MAP must expand to its ASCII form."""
+    """NFKC (compatibility decomposition) expands every Unicode ligature."""
     cases = [
         ('\ufb00', 'ff'),
         ('\ufb01', 'fi'),
@@ -102,14 +107,24 @@ def test_prepare_currency_symbol_preserved():
     assert prepare_for_comparison("₹1630.58") == "₹1630.58"
 
 
-def test_prepare_curly_apostrophe_preserved():
+def test_prepare_curly_apostrophe_converted_by_skeleton():
     """
-    Curly apostrophe (U+2019) must NOT be flattened in Pass 1.
-    Pass 2 handles it. If we flattened here, Pass 2 could never
-    distinguish it from a real word-structure error.
+    Curly apostrophe (U+2019) IS now converted to straight apostrophe (U+0027)
+    in Pass 1 — by the Unicode skeleton map (confusables.txt).
+
+    Previous behaviour (NFC only): preserved in Pass 1, handled in Pass 2.
+    Current behaviour (NFKC + skeleton): resolved in Pass 1 before any check
+    runs, eliminating the false positive at source without needing Pass 2.
+
+    This means "India's" (curly) and "India's" (straight) become identical
+    before check_missing_words() runs — zero candidates, zero false positives.
     """
     result = prepare_for_comparison("India\u2019s")
-    assert result == "India\u2019s"
+    assert result == "India's", (
+        "Curly apostrophe must be converted to straight by skeleton map"
+    )
+    # The apostrophe must still be PRESENT — "India's" ≠ "Indias"
+    assert "'" in result, "Apostrophe must survive — India's vs Indias is detectable"
 
 
 def test_prepare_em_dash_preserved():
@@ -215,15 +230,6 @@ def test_get_find_text_missing_paragraph_returns_first_sentence():
     }
     result = get_find_text(issue)
     assert result == "The company reported strong growth"
-
-
-def test_get_find_text_extra_paragraph_returns_first_sentence():
-    issue = {
-        "type": "extra_paragraph",
-        "paragraph_text": "This paragraph is extra. With more content here.",
-    }
-    result = get_find_text(issue)
-    assert result == "This paragraph is extra"
 
 
 def test_get_find_text_unknown_type_returns_none():
@@ -496,3 +502,322 @@ def test_full_pipeline_double_space_still_caught():
 
     assert len(confirmed) == 1
     assert confirmed[0]["type"] == "extra_whitespace"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# prepare_for_comparison — NFKC + skeleton specific behaviour
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_prepare_quotes_via_skeleton():
+    """
+    Curly single quotes (U+2018/2019) → straight apostrophe via skeleton map.
+    This is a cross-institution Unicode confusable, handled by confusables.txt.
+    After prepare_for_comparison(), both sides of the comparison use straight
+    apostrophes — the false positive is eliminated before any check runs.
+    """
+    assert prepare_for_comparison("India\u2019s") == "India's"
+    assert prepare_for_comparison("\u2018quoted\u2019") == "'quoted'"
+
+
+def test_prepare_apostrophe_still_present():
+    """
+    After skeleton folding, the apostrophe must still be PRESENT in the output.
+    "India's" and "Indias" must remain distinguishable — missing apostrophe is
+    a real grammatical error that a content editor would be asked to fix.
+    """
+    with_apostrophe    = prepare_for_comparison("India\u2019s")
+    without_apostrophe = prepare_for_comparison("Indias")
+    assert with_apostrophe != without_apostrophe, (
+        "India's and Indias must remain different after normalization"
+    )
+    assert "'" in with_apostrophe, "Apostrophe must survive skeleton folding"
+    assert "'" not in without_apostrophe, "Indias has no apostrophe"
+
+
+def test_prepare_cyrillic_homoglyph_via_skeleton():
+    """
+    Cyrillic А (U+0410) → Latin A (U+0041) via skeleton map.
+    Cross-script homoglyphs are a real source of false positives in PDFs
+    where the font embeds Cyrillic characters that look identical to Latin.
+    """
+    cyrillic_a = '\u0410'   # CYRILLIC CAPITAL LETTER A
+    result = prepare_for_comparison(cyrillic_a)
+    assert result == 'A', f"Expected 'A', got {repr(result)}"
+
+
+def test_prepare_en_dash_protected():
+    """
+    En dash (U+2013) must NOT be normalised to hyphen.
+    skeleton_map maps it to '-' but PROTECTED_CHARS prevents this.
+    Some clients care about en dash vs hyphen style — show it to reviewer.
+    """
+    result = prepare_for_comparison("2020\u20132021")
+    assert '\u2013' in result, "En dash must survive PROTECTED_CHARS guard"
+    assert result == "2020\u20132021"
+
+
+def test_prepare_em_dash_protected():
+    """
+    Em dash (U+2014) must NOT be normalised.
+    skeleton_map maps it to the katakana prolonged sound mark (U+30FC) —
+    a semantically nonsensical substitution for English text.
+    PROTECTED_CHARS ensures em dash survives unchanged.
+    """
+    result = prepare_for_comparison("revenue\u2014before")
+    assert '\u2014' in result, "Em dash must survive PROTECTED_CHARS guard"
+    assert '\u30fc' not in result, "Em dash must NOT become katakana character"
+    assert result == "revenue\u2014before"
+
+
+def test_prepare_currency_indian_rupee_sign_preserved():
+    """₹ (U+20B9) is NOT in confusables.txt — it survives unchanged."""
+    assert prepare_for_comparison("₹9000") == "₹9000"
+
+
+def test_prepare_currency_all_symbols_preserved():
+    """All currency symbols used in Indian annual reports must survive."""
+    cases = [
+        ("H1630.58 Crores",  "H1630.58 Crores"),
+        ("Rs. 556.60 Crores", "Rs. 556.60 Crores"),
+        ("₹9000",             "₹9000"),
+        ("INR 1200",          "INR 1200"),
+    ]
+    for inp, expected in cases:
+        result = prepare_for_comparison(inp)
+        assert result == expected, (
+            f"Currency string {repr(inp)} was changed to {repr(result)}"
+        )
+
+
+def test_prepare_superscript_converted_by_nfkc():
+    """
+    Superscript digits ² ³ → 2 3 via NFKC.
+    For comparison purposes this is correct: a footnote marker "revenue²"
+    in the PDF and "revenue2" on the web (CMS may not support superscripts)
+    should compare as equal — not a content error.
+    """
+    assert prepare_for_comparison("revenue\u00b2") == "revenue2"
+    assert prepare_for_comparison("Tier\u00b3") == "Tier3"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# prepare_for_comparison — PDF hyphen line-break artifact
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_prepare_hyphen_linebreak_uppercase_collapsed():
+    """
+    "Patient- Centric" (PDF line-break artifact) → "Patient-Centric".
+
+    _join_lines_into_paragraph() preserves a space when the next line starts
+    with a capital letter, producing "Word- Word". This pattern never appears
+    in normal prose. prepare_for_comparison() removes the spurious space so
+    the PDF and web sides compare equal.
+    """
+    result = prepare_for_comparison("Patient- Centric")
+    assert result == "Patient-Centric"
+
+
+def test_prepare_hyphen_linebreak_lowercase_unchanged():
+    """
+    Lowercase continuation without space is left unchanged.
+    "high-quality" has no space after hyphen — already handled by the
+    extractor (lowercase join). prepare_for_comparison must not touch it.
+    """
+    assert prepare_for_comparison("high-quality") == "high-quality"
+
+
+def test_prepare_hyphen_linebreak_multiple_spaces_collapsed():
+    """
+    Multiple spaces after a hyphen are all removed.
+    "Patient-  Centric" (two spaces) → "Patient-Centric".
+    """
+    assert prepare_for_comparison("Patient-  Centric") == "Patient-Centric"
+
+
+def test_prepare_hyphen_linebreak_full_pipeline():
+    """
+    End-to-end: PDF "Patient- Centric" vs web "Patient-Centric" → zero issues.
+    """
+    from pdf_engine.qa.checks import check_missing_words
+
+    pdf_raw = "We offer a Patient- Centric Support System."
+    web_raw = "We offer a Patient-Centric Support System."
+
+    pdf_p1 = prepare_for_comparison(pdf_raw)
+    web_p1 = prepare_for_comparison(web_raw)
+
+    assert pdf_p1 == web_p1, (
+        f"After normalization both sides must be identical.\n"
+        f"PDF: {repr(pdf_p1)}\nWeb: {repr(web_p1)}"
+    )
+
+    candidates = check_missing_words(pdf_p1, web_p1)
+    assert len(candidates) == 0, f"Expected 0 issues, got: {candidates}"
+
+
+def test_prepare_hyphen_linebreak_does_not_affect_web_text():
+    """
+    Normal web text with a hyphenated compound is returned unchanged.
+    "Patient-Centric" has no space after the hyphen — not an artifact.
+    """
+    assert prepare_for_comparison("Patient-Centric") == "Patient-Centric"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Full pipeline — new false positives confirmed eliminated in Pass 1
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_full_pipeline_curly_apostrophe_resolved_in_pass_one():
+    """
+    With NFKC + skeleton, curly apostrophe false positive is resolved before
+    check_missing_words() runs — zero candidates, no Pass 2 needed.
+    Both sides become identical strings after prepare_for_comparison().
+    """
+    pdf_raw = "India\u2019s leading healthcare provider"
+    web_raw = "India's leading healthcare provider"
+
+    pdf_p1 = prepare_for_comparison(pdf_raw)
+    web_p1 = prepare_for_comparison(web_raw)
+
+    # After Pass 1 preparation, both strings must be identical.
+    assert pdf_p1 == web_p1, (
+        f"Both sides must be identical after prepare_for_comparison().\n"
+        f"PDF: {repr(pdf_p1)}\nWeb: {repr(web_p1)}"
+    )
+
+
+def test_full_pipeline_fi_ligature_resolved_in_pass_one():
+    """
+    ﬁ ligature false positive resolved in Pass 1 by NFKC.
+    PDF "ﬁrst" and web "first" become identical after prepare_for_comparison().
+    """
+    pdf_raw = "\ufb01rst quarter results"
+    web_raw = "first quarter results"
+
+    pdf_p1 = prepare_for_comparison(pdf_raw)
+    web_p1 = prepare_for_comparison(web_raw)
+
+    assert pdf_p1 == web_p1
+
+
+def test_full_pipeline_real_missing_apostrophe_still_caught():
+    """
+    "India's" vs "Indias" — missing apostrophe is a real grammatical error.
+    After prepare_for_comparison(), "India's" ≠ "Indias" → check flags it.
+
+    Input texts use a filler sentence to meet the sentence-splitter 6-word
+    minimum and to provide enough context for find_best_window to slide over.
+    """
+    from pdf_engine.qa.checks import check_missing_words
+
+    mock_log = _mock_logger()
+    filler = "Our organization serves patients across multiple regions with dedication."
+    pdf_raw = filler + " India's leadership in healthcare drives all innovation. " + filler
+    web_raw = filler + " Indias leadership in healthcare drives all innovation. " + filler
+
+    pdf_p1 = prepare_for_comparison(pdf_raw)
+    web_p1 = prepare_for_comparison(web_raw)
+
+    assert pdf_p1 != web_p1, "Real apostrophe difference must survive preparation"
+
+    candidates = check_missing_words(pdf_p1, web_p1)
+    assert len(candidates) > 0, (
+        "Missing apostrophe must be flagged as a candidate issue"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# skeleton_map — download, cache, offline fallback
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_skeleton_map_parse_confusables():
+    """_parse_confusables() correctly extracts source → target pairs."""
+    from pdf_engine.pipeline.skeleton_map import _parse_confusables
+
+    sample = (
+        "# Unicode confusables\n"
+        "0041 ; 0041 ; MA\n"          # A → A (identity mapping)
+        "2019 ; 0027 ; MA\n"          # ' → ' (curly → straight)
+        "0410 ; 0041 ; MA\n"          # Cyrillic А → Latin A
+        "\n"
+        "# another comment\n"
+        "invalid line no semicolon\n"
+    )
+    result = _parse_confusables(sample)
+
+    assert chr(0x2019) in result
+    assert result[chr(0x2019)] == "'"
+    assert chr(0x0410) in result
+    assert result[chr(0x0410)] == 'A'
+
+
+def test_skeleton_map_offline_fallback_uses_cache(tmp_path):
+    """
+    If network download fails and a cache file exists, the cache is used.
+    Pipeline must never crash on network failure.
+    """
+    from pdf_engine.pipeline import skeleton_map as sm
+
+    # Write a minimal fake cache
+    fake_cache = {chr(0x2019): "'", chr(0x0410): "A"}
+    cache_file = tmp_path / "confusables_cache.json"
+    cache_file.write_text(
+        json.dumps({k: v for k, v in fake_cache.items()}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with patch.object(sm, 'CACHE_PATH', cache_file):
+        with patch('urllib.request.urlopen', side_effect=OSError("no network")):
+            result = sm.download_confusables()
+
+    assert result[chr(0x2019)] == "'"
+    assert result[chr(0x0410)] == "A"
+
+
+def test_skeleton_map_offline_no_cache_returns_empty(tmp_path):
+    """
+    If network download fails and NO cache exists, empty dict is returned.
+    Pipeline continues with NFKC alone — must not raise.
+    """
+    from pdf_engine.pipeline import skeleton_map as sm
+
+    nonexistent = tmp_path / "does_not_exist.json"
+
+    with patch.object(sm, 'CACHE_PATH', nonexistent):
+        with patch('urllib.request.urlopen', side_effect=OSError("no network")):
+            result = sm.download_confusables()
+
+    assert result == {}
+
+
+def test_skeleton_map_fresh_cache_skips_network(tmp_path):
+    """
+    A fresh cache (< 30 days old) must be used without any network call.
+    """
+    from pdf_engine.pipeline import skeleton_map as sm
+
+    fake_cache = {chr(0x2019): "'"}
+    cache_file = tmp_path / "confusables_cache.json"
+    cache_file.write_text(
+        json.dumps({k: v for k, v in fake_cache.items()}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    # File just written — age ≈ 0 seconds (fresh)
+
+    network_called = []
+
+    def fake_urlopen(*args, **kwargs):
+        network_called.append(True)
+        raise AssertionError("Network should not be called for fresh cache")
+
+    with patch.object(sm, 'CACHE_PATH', cache_file):
+        with patch('urllib.request.urlopen', side_effect=fake_urlopen):
+            result = sm.download_confusables.__wrapped__(
+            ) if hasattr(sm.download_confusables, '__wrapped__') else sm._load_cache.__func__(sm) if False else None
+            # Test _load_cache + freshness directly
+            result = sm._load_cache()
+
+    assert result is not None
+    assert result[chr(0x2019)] == "'"
+    assert not network_called
+

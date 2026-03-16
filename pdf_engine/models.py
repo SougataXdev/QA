@@ -5,7 +5,7 @@ Strict typing. No optional fields that can silently swallow data.
 Compatible with Python 3.9+.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Literal
 
 from pydantic import BaseModel, Field
 
@@ -26,6 +26,16 @@ class ProcessRequest(BaseModel):
         1.0,
         ge=0.0, le=1.0,
         description="Bottom crop ratio (1.0 = no crop, 0.9 = remove bottom 10%)"
+    )
+    crop_left: float = Field(
+        0.0,
+        ge=0.0, le=1.0,
+        description="Left crop ratio (0.0 = no crop, 0.1 = remove left 10%)"
+    )
+    crop_right: float = Field(
+        1.0,
+        ge=0.0, le=1.0,
+        description="Right crop ratio (1.0 = no crop, 0.9 = remove right 10%)"
     )
     page_range_start: int = Field(
         0,
@@ -59,45 +69,51 @@ class LayoutZone(BaseModel):
 
 
 # ─────────────────────────────────────────────
-# Comparison result (per-paragraph)
+# New QA types
 # ─────────────────────────────────────────────
 
-class DiffDetail(BaseModel):
-    added: List[str] = Field(default_factory=list)
-    removed: List[str] = Field(default_factory=list)
-
-
-class ComparisonResult(BaseModel):
-    block_id: int
+class PDFLocation(BaseModel):
     page: Optional[int] = None
-    pdf_text: str
-    status: str  # "PASS" | "WARNING" | "FAIL"
-    tier: int    # 1, 2, or 3
-    score: Optional[float] = None
-    diff: Optional[DiffDetail] = None
-    flag: Optional[str] = None
+    paragraph: Optional[int] = None
+    column: Optional[str] = None
 
+class WebLocation(BaseModel):
+    section: Optional[str] = None
+    selector: Optional[str] = None
 
-# ─────────────────────────────────────────────
-# Stitch flag
-# ─────────────────────────────────────────────
+class QAIssue(BaseModel):
+    id: str
+    type: Literal[
+        "extra_whitespace",
+        "currency_mismatch",
+        "missing_word",
+        "missing_paragraph",
+    ]
+    severity: Literal["must_fix", "minor"]
+    title: str
+    explanation: str
+    pdf_snippet: str
+    web_snippet: str
+    pdf_location: PDFLocation
+    web_location: WebLocation
+    # Typed diff data — present depending on `type`; absent fields are None.
+    space_count: Optional[int] = None           # extra_whitespace
+    pdf_symbol: Optional[str] = None            # currency_mismatch
+    web_symbol: Optional[str] = None            # currency_mismatch
+    numeric_value: Optional[str] = None         # currency_mismatch
+    unit: Optional[str] = None                  # currency_mismatch
+    missing_tokens: Optional[List[str]] = None  # missing_word
+    paragraph_text: Optional[str] = None        # missing_paragraph
+    context_before: Optional[str] = None        # extra_whitespace, currency_mismatch, missing_word
+    context_after: Optional[str] = None         # extra_whitespace, currency_mismatch, missing_word
 
-class StitchFlag(BaseModel):
-    type: str
-    location: str
-    text_fragment: str
-
-
-# ─────────────────────────────────────────────
-# Job summary
-# ─────────────────────────────────────────────
-
-class JobSummary(BaseModel):
-    total: int
-    passed: int
-    warnings: int
-    failures: int
-
+class QASummary(BaseModel):
+    must_fix: int
+    minor: int
+    extra_whitespace_count: int
+    currency_mismatch_count: int
+    missing_word_count: int
+    missing_paragraph_count: int
 
 # ─────────────────────────────────────────────
 # Job response (final)
@@ -108,11 +124,15 @@ class JobResponse(BaseModel):
     progress: int = 0
     message: Optional[str] = None
     error: Optional[str] = None
-    summary: Optional[JobSummary] = None
-    results: Optional[List[ComparisonResult]] = None
-    boilerplate_stripped: Optional[List[str]] = None
-    flags: Optional[List[StitchFlag]] = None
-    stitch_log: Optional[List[str]] = None
+
+    # QA report fields
+    brand: Optional[str] = None
+    pdf_source: Optional[str] = None
+    web_source: Optional[str] = None
+    run_date: Optional[str] = None
+    overall: Optional[Literal["needs_fixing", "minor_issues", "all_clear"]] = None
+    summary: Optional[QASummary] = None
+    issues: Optional[List[QAIssue]] = None
 
 
 # ─────────────────────────────────────────────

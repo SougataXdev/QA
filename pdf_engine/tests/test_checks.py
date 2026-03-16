@@ -21,6 +21,9 @@ from pdf_engine.qa.checks import (
     _extract_figures,
     _CURRENCY_PATTERN,
     check_currency_mismatch,
+    check_missing_words,
+    split_into_sentences,
+    find_best_window,
 )
 
 
@@ -261,4 +264,264 @@ class TestCurrencyMismatchCheck:
         # Pattern flags must NOT include re.IGNORECASE (value 2)
         assert not (_CURRENCY_PATTERN.flags & re.IGNORECASE), (
             "re.IGNORECASE must not be set — it causes mid-word false positives"
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# check_missing_words — Sentence-aligned architecture regression tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestMissingWordsCheck:
+    """
+    Regression tests for the sentence-aligned local difflib architecture.
+
+    Architecture under test:
+      1. split_into_sentences() — regex-based, no NLP libraries
+      2. find_best_window()     — rapidfuzz.partial_ratio, order-invariant
+      3. check_missing_words()  — local difflib on aligned pairs only
+
+    These tests replace any tests for the old full-document ndiff + reorder
+    guard, which was the wrong architecture.
+    """
+
+    # ── TEST 1 — Single missing word detected ────────────────────────────────
+
+    def test_single_missing_word_detected(self):
+        """
+        TEST 1: A single word present in PDF but absent from web is detected.
+
+        PDF: "We deliver high-quality accessible fertility care to all patients."
+        Web: same sentence without "high-quality"
+        Expected: missing_word issue for "high-quality"
+        """
+        pdf_text = "We deliver high-quality accessible fertility care to all patients."
+        web_text = (
+            "Our clinics have been operational for many years across the region. "
+            "We deliver accessible fertility care to all patients in our network. "
+            "Our dedicated team works tirelessly to improve patient outcomes daily."
+        )
+        issues = check_missing_words(pdf_text, web_text)
+        missing_tokens = [tok for issue in issues if issue["type"] == "missing_word" for tok in issue["missing_tokens"]]
+        assert "high-quality" in missing_tokens, (
+            f"Single missing word 'high-quality' was not detected. Issues: {issues}"
+        )
+
+    # ── TEST 2 — Multiple missing words detected ─────────────────────────────
+
+    def test_multiple_missing_words_detected(self):
+        """
+        TEST 2: Multiple words present in PDF but absent from web are all detected.
+
+        PDF: "Our continued commitment to quality healthcare values drives all decisions."
+        Web: same sentence without "continued" and "quality"
+        Expected: missing_word issues for both "continued" and "quality"
+        """
+        pdf_text = "Our continued commitment to quality healthcare values drives all decisions."
+        web_text = (
+            "We have operated for many years with strong values in everything we do. "
+            "Our commitment to healthcare values drives all decisions across the organization. "
+            "We continue to serve patients every day with precision and genuine care."
+        )
+        issues = check_missing_words(pdf_text, web_text)
+        missing_tokens = [tok for issue in issues if issue["type"] == "missing_word" for tok in issue["missing_tokens"]]
+        assert "continued" in missing_tokens, (
+            f"'continued' not detected as missing. All missing: {missing_tokens}"
+        )
+        assert "quality" in missing_tokens, (
+            f"'quality' not detected as missing. All missing: {missing_tokens}"
+        )
+
+    # ── TEST 3 — Section reorder — no false positive ─────────────────────────
+
+    def test_section_reorder_no_false_positive(self):
+        """
+        TEST 3: Content present in web but in a different section order must
+        produce zero missing_word issues.
+
+        PDF order:     block A then block B
+        Website order: block B then block A
+        Expected: zero missing_word issues (content is present, just reordered)
+        """
+        block_a = (
+            "We deliver high-quality accessible fertility care to all patients in our network."
+        )
+        block_b = (
+            "Our mission is to provide world-class healthcare services across every community."
+        )
+        pdf_text = block_a + " " + block_b
+        web_text = block_b + " " + block_a  # reversed order
+
+        issues = check_missing_words(pdf_text, web_text)
+        assert issues == [], (
+            f"False positive from section reorder. issues: {issues}"
+        )
+
+    # ── TEST 4 — Section reorder with missing word inside ────────────────────
+
+    def test_section_reorder_with_missing_word_inside(self):
+        """
+        TEST 4: Section reordering is handled architecturally, AND a genuinely
+        missing word inside the reordered section is still detected.
+
+        PDF order:     block A then block B (with "world-class")
+        Website order: block B first (without "world-class") then block A
+        Expected: missing_word issue for "world-class" despite the reorder
+        """
+        block_a = (
+            "We deliver high-quality accessible fertility care to all patients in our network."
+        )
+        block_b_pdf = (
+            "Our mission is to provide world-class healthcare services across every community."
+        )
+        block_b_web = (
+            "Our mission is to provide healthcare services across every community."
+        )
+        pdf_text = block_a + " " + block_b_pdf
+        web_text = block_b_web + " " + block_a  # B (without word) first, then A
+
+        issues = check_missing_words(pdf_text, web_text)
+        missing_tokens = [tok for issue in issues if issue["type"] == "missing_word" for tok in issue["missing_tokens"]]
+        assert "world-class" in missing_tokens, (
+            f"'world-class' was not detected despite section reorder. "
+            f"Issues: {issues}"
+        )
+
+    # ── TEST 5 — Sentence below 70% match — not raised as missing word ───────
+
+    def test_sentence_below_70_percent_not_raised_as_missing_word(self):
+        """
+        TEST 5: A PDF sentence not found on the website at all (score < 70%)
+        must NOT be raised as a missing_word issue.
+        Missing paragraphs are handled by Check 4 (rapidfuzz per paragraph).
+        Check 3 must not duplicate that responsibility.
+
+        Expected: zero missing_word issues
+        """
+        pdf_text = (
+            "This clinical governance section was only included in the annual report document."
+        )
+        web_text = (
+            "Our organization has been serving diverse patients across multiple states for many years. "
+            "We are committed to improving healthcare access for all communities we serve. "
+            "Our teams work hard every day to deliver excellent care to every patient."
+        )
+        issues = check_missing_words(pdf_text, web_text)
+        assert issues == [], (
+            f"Sentence with score < 70% was raised as missing_word "
+            f"(should be Check 4 only). Issues: {issues}"
+        )
+
+    # ── TEST 6 — Perfect match — no issue ────────────────────────────────────
+
+    def test_perfect_match_no_issue(self):
+        """
+        TEST 6: A PDF sentence that appears identically on the website must
+        produce zero issues.
+
+        Expected: zero issues
+        """
+        sentence = "We deliver high-quality accessible fertility care to all patients."
+        pdf_text = sentence
+        web_text = (
+            "Our clinics serve many patients across the region every single day. "
+            + sentence
+            + " Our teams are dedicated to excellence in healthcare."
+        )
+        issues = check_missing_words(pdf_text, web_text)
+        assert issues == [], (
+            f"Perfect match produced an issue: {issues}"
+        )
+
+    # ── TEST 7 — Sentence splitter — decimal protection ──────────────────────
+
+    def test_sentence_splitter_decimal_protection(self):
+        """
+        TEST 7: Decimal numbers must not cause sentence splitting.
+
+        "revenues of H1630.58 Crores increased by 9.34% annually"
+        The dots in 1630.58 and 9.34 must not trigger a sentence boundary.
+        Expected: treated as one sentence, not split at decimal
+        """
+        text = "revenues of H1630.58 Crores increased by 9.34% annually across all segments."
+        sentences = split_into_sentences(text)
+        assert len(sentences) == 1, (
+            f"Decimal point incorrectly split the sentence. Got: {sentences}"
+        )
+        assert "1630.58" in sentences[0], "Decimal number was corrupted during protection"
+        assert "9.34" in sentences[0], "Decimal number was corrupted during protection"
+
+    # ── TEST 8 — Sentence splitter — abbreviation protection ─────────────────
+
+    def test_sentence_splitter_abbreviation_protection(self):
+        """
+        TEST 8: Known abbreviations with periods must not cause sentence splitting.
+
+        "Dr. Singh leads our clinical team at Rs. 500 Crores"
+        Neither "Dr." nor "Rs." should trigger a sentence boundary split.
+        Expected: not split at Dr. or Rs.
+        """
+        text = "Dr. Singh leads our clinical team managing Rs. 500 Crores in healthcare."
+        sentences = split_into_sentences(text)
+        assert len(sentences) == 1, (
+            f"Abbreviation period incorrectly split the sentence. Got: {sentences}"
+        )
+        assert "Dr." in sentences[0], "Abbreviation was corrupted"
+        assert "Rs." in sentences[0], "Abbreviation was corrupted"
+
+    # ── TEST 9 — Confirmed production case resolved ───────────────────────────
+
+    def test_section_swap_awareness_accessibility_reliability(self):
+        """
+        TEST 9: Confirmed production case — AWARENESS/ACCESSIBILITY/RELIABILITY
+        section order swap between PDF and website.
+
+        PDF order:     AWARENESS → ACCESSIBILITY → RELIABILITY
+        Website order: AWARENESS → RELIABILITY → ACCESSIBILITY
+
+        Old architecture (full-document ndiff): ACCESSIBILITY falsely flagged as missing.
+        New architecture (sentence-aligned):    zero false positives.
+
+        Expected: zero missing_word issues from section swap
+        """
+        awareness = (
+            "We are deeply committed to raising awareness about our services "
+            "and healthcare outreach programs for all patients."
+        )
+        accessibility = (
+            "Our accessibility initiatives ensure every patient can access "
+            "quality care affordably across every region we serve."
+        )
+        reliability = (
+            "Reliability is at the core of our healthcare delivery system "
+            "and builds lasting patient trust across the nation."
+        )
+        pdf_text = awareness + " " + accessibility + " " + reliability
+        web_text = awareness + " " + reliability + " " + accessibility  # swap
+
+        issues = check_missing_words(pdf_text, web_text)
+        assert issues == [], (
+            f"False positives from AWARENESS/ACCESSIBILITY/RELIABILITY section swap: {issues}"
+        )
+
+    # ── TEST 10 — Currency difference not raised as missing word ─────────────
+
+    def test_currency_difference_not_raised_as_missing_word(self):
+        """
+        TEST 10: A currency symbol difference (H vs Rs.) must not be raised
+        as a missing_word issue by Check 3.
+
+        "revenues of H1630.58 Crores" is 4 words — below the 6-word minimum
+        threshold in split_into_sentences(). The splitter discards it.
+        Check 3 never processes the fragment.
+        The currency difference (H vs Rs. for same numeric value) is the
+        responsibility of Check 2 (check_currency_mismatch).
+
+        Expected: zero missing_word issues
+        """
+        pdf_text = "revenues of H1630.58 Crores"   # 4 words — below 6-word minimum
+        web_text = "revenues of Rs. 1630.58 Crores"
+        issues = check_missing_words(pdf_text, web_text)
+        assert issues == [], (
+            f"Currency difference raised as missing_word; should be Check 2 only. "
+            f"Issues: {issues}"
         )

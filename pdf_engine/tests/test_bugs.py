@@ -39,7 +39,6 @@ from pdf_engine.qa.checks import (
     check_currency_mismatch,
     check_missing_words,
     check_missing_paragraphs,
-    check_extra_paragraphs,
 )
 
 
@@ -342,8 +341,17 @@ class TestNoLegacyDiffHtml:
 
     def test_check_missing_words_no_diff_html(self):
         """check_missing_words must not produce diff_html."""
-        # PDF has 'missing' which is absent from web
-        issues = check_missing_words("hello world missing", "hello world")
+        # Use ≥6-word sentences — the sentence splitter minimum.
+        # PDF has 'high-quality' which is absent from the web text.
+        pdf_text = (
+            "Our clinics have been operational for many years across the region. "
+            "We deliver high-quality accessible fertility care to all our patients."
+        )
+        web_text = (
+            "Our clinics have been operational for many years across the region. "
+            "We deliver accessible fertility care to all our patients."
+        )
+        issues = check_missing_words(pdf_text, web_text)
         assert len(issues) >= 1, "Test input must produce at least one issue"
         self._assert_no_diff_html(issues, "check_missing_words")
 
@@ -355,14 +363,6 @@ class TestNoLegacyDiffHtml:
         issues = check_missing_paragraphs("", "unrelated web content", pdf_paragraphs)
         # At least one issue should be found (score will be < 80 threshold)
         self._assert_no_diff_html(issues, "check_missing_paragraphs")
-
-    def test_check_extra_paragraphs_no_diff_html(self):
-        """check_extra_paragraphs must not produce diff_html."""
-        # Web paragraph long enough to trigger the check (>= 60 chars)
-        long_para = "This paragraph is only on the website and does not appear in the PDF."
-        web_paragraphs = [{"text": long_para, "section": {"section": "Content", "selector": "body"}}]
-        issues = check_extra_paragraphs("unrelated pdf content", "", web_paragraphs)
-        self._assert_no_diff_html(issues, "check_extra_paragraphs")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -112,6 +112,8 @@ async def process(
     url: str = Query(..., description="Target URL to scrape for DOM comparison"),
     crop_top: float = Query(0.0, ge=0.0, le=1.0, description="Top crop ratio"),
     crop_bottom: float = Query(1.0, ge=0.0, le=1.0, description="Bottom crop ratio"),
+    crop_left: float = Query(0.0, ge=0.0, le=1.0, description="Left crop ratio"),
+    crop_right: float = Query(1.0, ge=0.0, le=1.0, description="Right crop ratio"),
     page_range_start: int = Query(0, ge=0, description="First page (0-indexed, inclusive)"),
     page_range_end: int = Query(-1, description="Last page (0-indexed, exclusive). -1 = all."),
 ):
@@ -140,6 +142,11 @@ async def process(
             status_code=400,
             detail=f"crop_top ({crop_top}) must be less than crop_bottom ({crop_bottom})",
         )
+    if crop_left >= crop_right:
+        raise HTTPException(
+            status_code=400,
+            detail=f"crop_left ({crop_left}) must be less than crop_right ({crop_right})",
+        )
 
     # Store initial job status
     redis = await _get_redis()
@@ -158,6 +165,8 @@ async def process(
             url,
             crop_top,
             crop_bottom,
+            crop_left,
+            crop_right,
             page_range_start,
             page_range_end,
         )
