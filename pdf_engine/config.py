@@ -55,3 +55,4 @@ SCRAPER_RETRY_DELAY_S: int = 5
 # Redis
 # ─────────────────────────────────────────────
 REDIS_URL: str = os.environ.get("REDIS_URL", "redis://localhost:6379")
+JOB_STATUS_TTL: int = 3600  # seconds — auto-expire completed/failed job keys after 1 hour

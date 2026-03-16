@@ -22,6 +22,7 @@ from arq import create_pool
 from arq.connections import RedisSettings
 
 from pdf_engine.config import (
+    JOB_STATUS_TTL,
     JOB_TIMEOUT_SECONDS,
     REDIS_URL,
 )
@@ -83,6 +84,8 @@ async def set_status(
     data.update(extra)
 
     await redis.set(f"job:{job_id}", json.dumps(data).encode())
+    if status in ("COMPLETE", "FAILED"):
+        await redis.expire(f"job:{job_id}", JOB_STATUS_TTL)
     await redis.close()
 
 
@@ -321,6 +324,7 @@ async def run_pipeline(
 
         redis = await _get_redis()
         await redis.set(f"job:{job_id}", json.dumps(final).encode())
+        await redis.expire(f"job:{job_id}", JOB_STATUS_TTL)
         await redis.close()
 
         logger.info(

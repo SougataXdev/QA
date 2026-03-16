@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from pdf_engine.config import REDIS_URL
+from pdf_engine.config import JOB_STATUS_TTL, REDIS_URL
 from pdf_engine.models import JobCreatedResponse, JobResponse
 
 logger = logging.getLogger(__name__)
@@ -182,6 +182,7 @@ async def process(
                 "error": f"QUEUE_ERROR: {str(exc)}",
             }),
         )
+        await redis.expire(f"job:{job_id}", JOB_STATUS_TTL)
         raise HTTPException(
             status_code=503,
             detail="Job queue unavailable. Please try again later.",
