@@ -17,8 +17,6 @@ services:
         fromDatabase:
           name: qa-redis
           property: connectionString
-      - key: PYTHON_VERSION
-        value: "3.11"
 
   # ── ARQ Worker (PDF pipeline + Playwright) ───
   - type: worker
@@ -32,5 +30,3 @@ services:
         fromDatabase:
           name: qa-redis
           property: connectionString
-      - key: PYTHON_VERSION
-        value: "3.11"
