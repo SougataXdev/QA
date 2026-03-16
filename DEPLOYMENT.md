@@ -69,18 +69,19 @@ Your repo already has:
 4. Select your QA repo
 5. Fill in the settings:
 
-| Field              | Value                                                                                   |
-| ------------------ | --------------------------------------------------------------------------------------- |
-| **Name**           | `qa-api`                                                                                |
-| **Region**         | Same region as your Redis                                                               |
-| **Branch**         | `main`                                                                                  |
-| **Root Directory** | _(leave empty)_                                                                         |
-| **Runtime**        | `Python 3`                                                                              |
-| **Build Command**  | `pip install -r pdf_engine/requirements.txt && playwright install --with-deps chromium` |
-| **Start Command**  | `honcho start`                                                                          |
-| **Plan**           | Free                                                                                    |
+| Field              | Value                     |
+| ------------------ | ------------------------- |
+| **Name**           | `qa-api`                  |
+| **Region**         | Same region as your Redis |
+| **Branch**         | `main`                    |
+| **Root Directory** | _(leave empty)_           |
+| **Runtime**        | `Python 3`                |
+| **Build Command**  | `bash build.sh`           |
+| **Start Command**  | `honcho start`            |
+| **Plan**           | Free                      |
 
 > **Why `honcho start`?** It reads the `Procfile` and launches both processes:
+>
 > ```
 > web: uvicorn pdf_engine.main:app --host 0.0.0.0 --port $PORT
 > worker: python -m arq pdf_engine.worker.WorkerSettings
@@ -190,10 +191,10 @@ This is normal on Render's free tier. Free services "sleep" after 15 minutes of 
 Make sure the **Build Command** on `qa-api` is:
 
 ```
-pip install -r pdf_engine/requirements.txt && playwright install --with-deps chromium
+bash build.sh
 ```
 
-The `--with-deps` flag installs system-level dependencies (fonts, libraries) that Chromium needs.
+The `build.sh` script installs pip dependencies, then installs Chromium's system packages via `sudo apt-get`, then runs `playwright install chromium`. This avoids Playwright's `--with-deps` flag which uses `su` and fails on Render.
 
 ---
 
