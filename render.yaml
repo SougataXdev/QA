@@ -12,8 +12,9 @@ services:
     buildCommand: pip install -r pdf_engine/requirements.txt
     startCommand: uvicorn pdf_engine.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
-    runtimeVersion: "3.11.9"
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
       - key: REDIS_URL
         fromDatabase:
           name: qa-redis
@@ -26,8 +27,9 @@ services:
     plan: free
     buildCommand: pip install -r pdf_engine/requirements.txt && playwright install --with-deps chromium
     startCommand: python -m arq pdf_engine.worker.WorkerSettings
-    runtimeVersion: "3.11.9"
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
       - key: REDIS_URL
         fromDatabase:
           name: qa-redis
