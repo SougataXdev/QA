@@ -7,3 +7,4 @@ rapidfuzz
 python-multipart
 pydantic
 PyMuPDF
+honcho
