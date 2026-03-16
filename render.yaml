@@ -1,0 +1,36 @@
+databases:
+  - name: qa-redis
+    plan: free
+    ipAllowList: []
+
+services:
+  # ── FastAPI API ──────────────────────────────
+  - type: web
+    name: qa-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r pdf_engine/requirements.txt
+    startCommand: uvicorn pdf_engine.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: REDIS_URL
+        fromDatabase:
+          name: qa-redis
+          property: connectionString
+      - key: PYTHON_VERSION
+        value: "3.11"
+
+  # ── ARQ Worker (PDF pipeline + Playwright) ───
+  - type: worker
+    name: qa-worker
+    runtime: python
+    plan: free
+    buildCommand: pip install -r pdf_engine/requirements.txt && playwright install --with-deps chromium
+    startCommand: python -m arq pdf_engine.worker.WorkerSettings
+    envVars:
+      - key: REDIS_URL
+        fromDatabase:
+          name: qa-redis
+          property: connectionString
+      - key: PYTHON_VERSION
+        value: "3.11"

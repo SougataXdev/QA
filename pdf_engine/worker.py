@@ -47,12 +47,14 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_redis_url(url: str) -> RedisSettings:
-    """Parse a redis:// URL into ARQ RedisSettings."""
-    url = url.replace("redis://", "")
-    parts = url.split(":")
-    host = parts[0] if parts[0] else "localhost"
-    port = int(parts[1]) if len(parts) > 1 else 6379
-    return RedisSettings(host=host, port=port)
+    """Parse a redis:// URL into ARQ RedisSettings (handles auth + host + port)."""
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    return RedisSettings(
+        host=parsed.hostname or "localhost",
+        port=parsed.port or 6379,
+        password=parsed.password,
+    )
 
 
 async def _get_redis():

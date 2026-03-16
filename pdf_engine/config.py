@@ -8,6 +8,8 @@ boundaries, etc.) are NOT hardcoded here. They are derived empirically by
 the measure.py phase for each PDF individually.
 """
 
+import os
+
 # ─────────────────────────────────────────────
 # Boilerplate fingerprinting
 # ─────────────────────────────────────────────
@@ -52,4 +54,4 @@ SCRAPER_RETRY_DELAY_S: int = 5
 # ─────────────────────────────────────────────
 # Redis
 # ─────────────────────────────────────────────
-REDIS_URL: str = "redis://localhost:6379"
+REDIS_URL: str = os.environ.get("REDIS_URL", "redis://localhost:6379")

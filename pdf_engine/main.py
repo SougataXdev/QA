@@ -88,12 +88,14 @@ async def _get_arq_pool():
     """Get ARQ redis pool for job enqueue."""
     from arq import create_pool
     from arq.connections import RedisSettings
+    from urllib.parse import urlparse
 
-    url = REDIS_URL.replace("redis://", "")
-    parts = url.split(":")
-    host = parts[0] if parts[0] else "localhost"
-    port = int(parts[1]) if len(parts) > 1 else 6379
-    return await create_pool(RedisSettings(host=host, port=port))
+    parsed = urlparse(REDIS_URL)
+    return await create_pool(RedisSettings(
+        host=parsed.hostname or "localhost",
+        port=parsed.port or 6379,
+        password=parsed.password,
+    ))
 
 
 # ─────────────────────────────────────────────
